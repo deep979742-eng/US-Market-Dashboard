@@ -8,7 +8,6 @@ import base64
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
-import concurrent.futures
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
@@ -54,7 +53,7 @@ now_ist = datetime.datetime.now(IST)
 today_str = now_ist.strftime("%Y-%m-%d")
 
 HISTORY_FILE = "yf_chart_history.csv"
-SNAPSHOT_FILE = "yf_snapshot_8pm.json" 
+SNAPSHOT_FILE = "yf_snapshot_us.json" 
 AUTO_SAVE_FILE = "yf_auto_save_tracker.txt"
 
 if 'live_base_date' not in st.session_state or st.session_state.live_base_date != today_str:
@@ -79,7 +78,7 @@ def get_gspread_client():
 # 3. STOCK LIST & HELPER FUNCTIONS
 # ==========================================
 raw_symbols = [
-    "AAPL", "MSFT", "TSLA", "NVDA", "AMZN", "META", "GOOGL", "NFLX", "AMD", "SPY", "QQQ"
+    "AAPL", "MSFT", "TSLA", "NVDA", "AMZN", "META","SPCX","SKHX","MU","INTC","MRVL","SNDK","SMSN","MSTR","EWY","CRCL","HOOD","COIN","ORCL","PLTR","TSM","CRWV","NIKEI255","HYUNDAI", "GOOGL", "NFLX", "AMD", "SPY", "QQQ"
 ]
 
 def calc_vol_pcr(ce_vol, pe_vol): return 0.0 if ce_vol == 0 else round(pe_vol / ce_vol, 2)
@@ -161,11 +160,14 @@ def run_master_scan(date_str):
     new_csv_rows = []
     live_ltp_data = {} 
 
-    # 🚀 YFINANCE FETCH LOGIC (WITH ADVANCED ERROR CATCHING)
     def fetch_yf_data(sym):
+        import requests
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        
         for attempt in range(3):
             try:
-                tk = yf.Ticker(sym)
+                tk = yf.Ticker(sym, session=session)
                 hist = tk.history(period="5d")
                 
                 if hist.empty: 
@@ -179,7 +181,7 @@ def run_master_scan(date_str):
 
                 exps = tk.options
                 if not exps: 
-                    return sym, "No Options Found", None
+                    return sym, "No Options", None
                 
                 opt = tk.option_chain(exps[0])
                 return sym, {
@@ -187,51 +189,62 @@ def run_master_scan(date_str):
                     'ltp_ch': ltp_ch, 'chg_pct': chg_pct
                 }, opt
             except Exception as e:
-                time.sleep(2) # Agar block hua toh 2 second rukega
+                time.sleep(2)
                 if attempt == 2:
-                    return sym, f"Err: {str(e)[:15]}", None
+                    return sym, f"Err: {str(e)[:10]}", None
                     
-        return sym, "Unknown Error", None
+        return sym, "Unknown", None
 
-    # 🚀 SPEED LIMIT APPLIED (max_workers=2) TO PREVENT BLOCK
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        results = executor.map(fetch_yf_data, raw_symbols)
-        for s_name, spot_data, oc in results:
+    for s_name in raw_symbols:
+        s_name, spot_data, oc = fetch_yf_data(s_name)
+        
+        time.sleep(1) 
+        
+        if spot_data is None or isinstance(spot_data, str) or not oc:
+            err_msg = spot_data if isinstance(spot_data, str) else "NA"
+            final_list.append({'SYMS': f"{s_name} ({err_msg})", 'OPEN_STATUS': "NA", 'V_PCR': 0.0, 'O_PCR': 0.0, 'V_CPR': 0.0, 'LTP_CH': 0.0, 'CHG_%': 0.0, 'LTP': 0.0, 'VOL_ABS': 0.0, 'PCR_ABS': 0.0, 'VOL_PCT': 0.0, 'PCR_PCT': 0.0, 'CE_CON': 0.0, 'PE_CON': 0.0})
+            continue
             
-            # Error aane par yahan capture hoga
-            if spot_data is None or isinstance(spot_data, str) or not oc:
-                err_msg = spot_data if isinstance(spot_data, str) else "NA"
-                final_list.append({'SYMS': f"{s_name} ({err_msg})", 'OPEN_STATUS': "NA", 'V_PCR': 0.0, 'O_PCR': 0.0, 'V_CPR': 0.0, 'LTP_CH': 0.0, 'CHG_%': 0.0, 'LTP': 0.0, 'VOL_ABS': 0.0, 'PCR_ABS': 0.0, 'VOL_PCT': 0.0, 'PCR_PCT': 0.0, 'CE_CON': 0.0, 'PE_CON': 0.0})
-                continue
-                
-            open_p = spot_data['open_p']
-            float_c = spot_data['float_c']
-            spot_ltp = spot_data['spot_ltp']
-            open_status = "NA" if open_p == 0 or float_c == 0 else "Gap Up 🔼" if open_p > float_c else "Gap Down 🔽" if open_p < float_c else "Same ➖"
+        open_p = spot_data['open_p']
+        float_c = spot_data['float_c']
+        spot_ltp = spot_data['spot_ltp']
+        open_status = "NA" if open_p == 0 or float_c == 0 else "Gap Up 🔼" if open_p > float_c else "Gap Down 🔽" if open_p < float_c else "Same ➖"
 
-            calls = oc.calls
-            puts = oc.puts
-            
-            c_oi = float(calls['openInterest'].sum() if 'openInterest' in calls else 0)
-            p_oi = float(puts['openInterest'].sum() if 'openInterest' in puts else 0)
-            c_v = float(calls['volume'].sum() if 'volume' in calls else 0)
-            p_v = float(puts['volume'].sum() if 'volume' in puts else 0)
-            
-            for _, row in calls.iterrows():
-                sym_str = str(row.get('contractSymbol', ''))
-                lp_str = round(float(row.get('lastPrice', 0)), 2)
-                if lp_str > 0: live_ltp_data[sym_str] = lp_str
+        calls = oc.calls
+        puts = oc.puts
+        
+        c_oi = float(calls['openInterest'].sum() if 'openInterest' in calls else 0)
+        p_oi = float(puts['openInterest'].sum() if 'openInterest' in puts else 0)
+        c_v = float(calls['volume'].sum() if 'volume' in calls else 0)
+        p_v = float(puts['volume'].sum() if 'volume' in puts else 0)
+        
+        for _, row in calls.iterrows():
+            sym_str = str(row.get('contractSymbol', ''))
+            lp_str = round(float(row.get('lastPrice', 0)), 2)
+            if lp_str > 0: live_ltp_data[sym_str] = lp_str
 
-            for _, row in puts.iterrows():
-                sym_str = str(row.get('contractSymbol', ''))
-                lp_str = round(float(row.get('lastPrice', 0)), 2)
-                if lp_str > 0: live_ltp_data[sym_str] = lp_str
+        for _, row in puts.iterrows():
+            sym_str = str(row.get('contractSymbol', ''))
+            lp_str = round(float(row.get('lastPrice', 0)), 2)
+            if lp_str > 0: live_ltp_data[sym_str] = lp_str
 
-            o_pcr = calc_opt_pcr(c_oi, p_oi)
-            v_cpr = calc_vol_cpr(c_v, p_v)
-            v_pcr = calc_vol_pcr(c_v, p_v)
+        o_pcr = calc_opt_pcr(c_oi, p_oi)
+        v_cpr = calc_vol_cpr(c_v, p_v)
+        v_pcr = calc_vol_pcr(c_v, p_v)
 
-            if scan_time_ist.time() < datetime.time(20, 0):
+        # 🚀 US MARKET TIME LOGIC & 7:45 PM SNAPSHOT 🚀
+        current_time = scan_time_ist.time()
+        
+        # US Market check (Between 7 PM and 1:30 AM IST)
+        is_us_market_open = (current_time >= datetime.time(19, 0)) or (current_time <= datetime.time(1, 30))
+        
+        # 🎯 Snapshot Time changed to 7:45 PM IST (19:45)
+        is_past_snapshot_time = (current_time >= datetime.time(19, 45)) or (current_time <= datetime.time(1, 30))
+
+        if not is_us_market_open:
+            pcr_abs, vol_abs, pcr_pct, vol_pct = 0.0, 0.0, 0.0, 0.0
+        else:
+            if not is_past_snapshot_time:
                 pcr_abs, vol_abs, pcr_pct, vol_pct = 0.0, 0.0, 0.0, 0.0
             else:
                 if s_name not in snap_time:
@@ -252,37 +265,38 @@ def run_master_scan(date_str):
                     pcr_pct = get_standard_pct(o_pcr, base_pcr_val)
                     vol_pct = get_standard_pct(v_cpr, base_vol_val)
 
-            def get_conv(opt_df):
-                if opt_df.empty: return 0.0
-                tot_p, tot_m = 0, 0
-                for _, row in opt_df.iterrows():
-                    sym = str(row.get('contractSymbol', ''))
-                    lp = round(float(row.get('lastPrice', 0)), 2)
-                    if lp == 0: continue
-                    
-                    diff = 0.0
-                    if sym in baseline_prices:
-                        diff = round(lp - baseline_prices[sym], 2)
-                    else:
-                        gen_key = get_generic_key(sym)
-                        if gen_key and gen_key in baseline_generic:
-                            diff = round(lp - baseline_generic[gen_key], 2)
-                            
-                    if diff > 0.00: tot_p += 1 
-                    elif diff < 0.00: tot_m += 1 
+        def get_conv(opt_df):
+            if opt_df.empty: return 0.0
+            tot_p, tot_m = 0, 0
+            for _, row in opt_df.iterrows():
+                sym = str(row.get('contractSymbol', ''))
+                lp = round(float(row.get('lastPrice', 0)), 2)
+                if lp == 0: continue
+                
+                diff = 0.0
+                if sym in baseline_prices:
+                    diff = round(lp - baseline_prices[sym], 2)
+                else:
+                    gen_key = get_generic_key(sym)
+                    if gen_key and gen_key in baseline_generic:
+                        diff = round(lp - baseline_generic[gen_key], 2)
+                        
+                if diff > 0.00: tot_p += 1 
+                elif diff < 0.00: tot_m += 1 
 
-                act = tot_p + tot_m
-                if act == 0: return 0.0
-                return round((tot_p / act) * 100, 2) if tot_p >= tot_m else -round((tot_m / act) * 100, 2)
-            
-            final_list.append({
-                'SYMS': s_name, 'OPEN_STATUS': open_status, 'V_PCR': v_pcr, 'O_PCR': o_pcr, 'V_CPR': v_cpr, 
-                'LTP_CH': spot_data['ltp_ch'], 'CHG_%': spot_data['chg_pct'], 'LTP': spot_ltp,
-                'VOL_ABS': round(vol_abs, 2), 'PCR_ABS': round(pcr_abs, 2), 
-                'VOL_PCT': round(vol_pct, 2), 'PCR_PCT': round(pcr_pct, 2),
-                'CE_CON': get_conv(calls), 'PE_CON': get_conv(puts)
-            })
+            act = tot_p + tot_m
+            if act == 0: return 0.0
+            return round((tot_p / act) * 100, 2) if tot_p >= tot_m else -round((tot_m / act) * 100, 2)
+        
+        final_list.append({
+            'SYMS': s_name, 'OPEN_STATUS': open_status, 'V_PCR': v_pcr, 'O_PCR': o_pcr, 'V_CPR': v_cpr, 
+            'LTP_CH': spot_data['ltp_ch'], 'CHG_%': spot_data['chg_pct'], 'LTP': spot_ltp,
+            'VOL_ABS': round(vol_abs, 2), 'PCR_ABS': round(pcr_abs, 2), 
+            'VOL_PCT': round(vol_pct, 2), 'PCR_PCT': round(pcr_pct, 2),
+            'CE_CON': get_conv(calls), 'PE_CON': get_conv(puts)
+        })
 
+        if is_us_market_open:
             new_csv_rows.append({'Date': date_str, 'Symbol': s_name, 'Time': time_str, 'LTP': spot_ltp, 'VOL PCR': v_pcr, 'OPT PCR': o_pcr, 'VOL CPR': v_cpr})
 
     if snapshot_changed and client:
@@ -357,7 +371,7 @@ if cached_result is not None:
     st.session_state.cached_data = cached_result
     st.session_state.last_api_call = datetime.datetime.fromtimestamp(last_scan_timestamp, IST)
     
-    if datetime.time(18, 0) <= now_ist.time() < datetime.time(19, 0):
+    if datetime.time(2, 0) <= now_ist.time() < datetime.time(2, 30):
         last_save = open(AUTO_SAVE_FILE, "r").read().strip() if os.path.exists(AUTO_SAVE_FILE) else ""
         if last_save != today_str:
             if save_eod_data(): open(AUTO_SAVE_FILE, "w").write(today_str)
@@ -443,12 +457,12 @@ if len(st.session_state.cached_data) > 0:
                             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color="black"))
                         )
                         st.plotly_chart(fig, use_container_width=True)
-                    else: st.info(f"⏳ Waiting for Market Data for {sel_stock}.")
+                    else: st.info(f"⏳ Waiting for Market Data for {sel_stock}. Today's data logs between 7:00 PM and 1:30 AM IST.")
                 else: st.info("⏳ Market data hasn't started logging yet today.")
             except Exception as e: st.error(f"Chart Load Error: {e}")
-        else: st.info("⏳ Chart History file is being prepared...")
+        else: st.info("⏳ Chart History file is being prepared... (Logs activate at 7:00 PM IST)")
 else:
-    st.error("⚠️ Data fetch me error aayi. Kripya check karein ki internet connection theek hai aur yfinance library install hai.")
+    st.error("⚠️ Data fetch me error aayi. Kripya check karein ki internet connection theek hai.")
 
 # ==========================================
 # 7. EXACT BOUNDARY AUTO-REFRESH LOGIC 🎯
@@ -456,6 +470,7 @@ else:
 now_refresh = datetime.datetime.now(IST)
 current_total_secs = now_refresh.minute * 60 + now_refresh.second
 
+# Har 5 minute par dashboard refresh hoga (Rate limit se bachne ke liye safe zone)
 targets = [(m * 60 + 5) for m in range(0, 65, 5)]
 secs_wait = 300
 for t in targets:
