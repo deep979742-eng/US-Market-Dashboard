@@ -18,7 +18,6 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================
 st.set_page_config(page_title="US F&O Dashboard", layout="wide")
 
-# CSS - FULLY MOBILE RESPONSIVE & LAPTOP SCREEN FIT
 css_str = """<style>
 [data-testid='stAppViewContainer'], [data-testid='stAppViewBlockContainer'], [data-testid='stHeader'], [data-testid='stSidebar'], .stApp, .stApp > div { opacity: 1 !important; filter: none !important; transition: none !important; } 
 [data-testid='stDataFrame'], [data-testid='stTabs'] { opacity: 1 !important; filter: none !important; transition: none !important; } 
@@ -162,12 +161,15 @@ def run_master_scan(date_str):
     new_csv_rows = []
     live_ltp_data = {} 
 
+    # 🚀 YFINANCE FETCH LOGIC (WITH ADVANCED ERROR CATCHING)
     def fetch_yf_data(sym):
         for attempt in range(3):
             try:
                 tk = yf.Ticker(sym)
                 hist = tk.history(period="5d")
-                if hist.empty: return sym, None, None
+                
+                if hist.empty: 
+                    return sym, "Hist Data Empty", None
                 
                 spot_ltp = float(hist['Close'].iloc[-1])
                 open_p = float(hist['Open'].iloc[-1])
@@ -176,22 +178,30 @@ def run_master_scan(date_str):
                 chg_pct = (ltp_ch / float_c) * 100 if float_c != 0 else 0
 
                 exps = tk.options
-                if not exps: return sym, None, None
+                if not exps: 
+                    return sym, "No Options Found", None
                 
                 opt = tk.option_chain(exps[0])
                 return sym, {
                     'spot_ltp': spot_ltp, 'open_p': open_p, 'float_c': float_c,
                     'ltp_ch': ltp_ch, 'chg_pct': chg_pct
                 }, opt
-            except Exception:
-                time.sleep(1) 
-        return sym, None, None
+            except Exception as e:
+                time.sleep(2) # Agar block hua toh 2 second rukega
+                if attempt == 2:
+                    return sym, f"Err: {str(e)[:15]}", None
+                    
+        return sym, "Unknown Error", None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # 🚀 SPEED LIMIT APPLIED (max_workers=2) TO PREVENT BLOCK
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         results = executor.map(fetch_yf_data, raw_symbols)
         for s_name, spot_data, oc in results:
-            if not spot_data or not oc:
-                final_list.append({'SYMS': s_name + " (NA)", 'OPEN_STATUS': "NA", 'V_PCR': 0.0, 'O_PCR': 0.0, 'V_CPR': 0.0, 'LTP_CH': 0.0, 'CHG_%': 0.0, 'LTP': 0.0, 'VOL_ABS': 0.0, 'PCR_ABS': 0.0, 'VOL_PCT': 0.0, 'PCR_PCT': 0.0, 'CE_CON': 0.0, 'PE_CON': 0.0})
+            
+            # Error aane par yahan capture hoga
+            if spot_data is None or isinstance(spot_data, str) or not oc:
+                err_msg = spot_data if isinstance(spot_data, str) else "NA"
+                final_list.append({'SYMS': f"{s_name} ({err_msg})", 'OPEN_STATUS': "NA", 'V_PCR': 0.0, 'O_PCR': 0.0, 'V_CPR': 0.0, 'LTP_CH': 0.0, 'CHG_%': 0.0, 'LTP': 0.0, 'VOL_ABS': 0.0, 'PCR_ABS': 0.0, 'VOL_PCT': 0.0, 'PCR_PCT': 0.0, 'CE_CON': 0.0, 'PE_CON': 0.0})
                 continue
                 
             open_p = spot_data['open_p']
@@ -233,13 +243,12 @@ def run_master_scan(date_str):
                     base_pcr_val = base['pcr']
                     base_vol_val = base['vol_cpr']
                     
-                    pcr_abs = o_pcr - base_pcr_val
-                    vol_abs = v_cpr - base_vol_val
-                    
                     def get_standard_pct(current_val, base_val):
                         if base_val == 0: return 0.0
                         return ((current_val - base_val) / base_val) * 100.0
                         
+                    pcr_abs = o_pcr - base_pcr_val
+                    vol_abs = v_cpr - base_vol_val
                     pcr_pct = get_standard_pct(o_pcr, base_pcr_val)
                     vol_pct = get_standard_pct(v_cpr, base_vol_val)
 
@@ -293,7 +302,7 @@ def run_master_scan(date_str):
     return final_list, scan_time_ist.timestamp()
 
 # ==========================================
-# 5. SIDEBAR & EOD SAVE (WITH ERROR HANDLING)
+# 5. SIDEBAR & EOD SAVE
 # ==========================================
 st.sidebar.header("📊 Yahoo Finance Status")
 st.sidebar.success("🟢 Connected to Market Data")
@@ -302,18 +311,18 @@ st.sidebar.header("💾 End Of Day (EOD) Save")
 
 def save_eod_data():
     if 'get_live_dump' not in st.session_state:
-        st.sidebar.error("⚠️ Error: Live Data अभी बना नहीं है। थोड़ा इंतज़ार करें।")
+        st.sidebar.error("⚠️ Error: Live Data abhi fetch nahi hua.")
         return False
         
     live_data = st.session_state.get_live_dump
     if not live_data:
-        st.sidebar.error("⚠️ Error: डेटा खाली है! (मार्केट बंद होने या Yahoo Finance से डेटा न आने की वजह से)")
+        st.sidebar.error("⚠️ Error: Data khali hai! API data nahi de raha.")
         return False
         
     try:
         client = get_gspread_client()
         if not client: 
-            st.sidebar.error("⚠️ Error: Google Sheet कनेक्ट नहीं हो पाई। Secrets (TOML) चेक करें।")
+            st.sidebar.error("⚠️ Error: Google Sheet connect nahi hui.")
             return False
             
         ss = client.open("US_F&O_Data")
