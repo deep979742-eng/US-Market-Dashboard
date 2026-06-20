@@ -79,7 +79,6 @@ def get_gspread_client():
 # ==========================================
 # 3. STOCK LIST & HELPER FUNCTIONS
 # ==========================================
-# 🔴 आप अपनी US Stocks की लिस्ट यहाँ अपडेट कर सकते हैं
 raw_symbols = [
     "AAPL", "MSFT", "TSLA", "NVDA", "AMZN", "META", "GOOGL", "NFLX", "AMD", "SPY", "QQQ"
 ]
@@ -88,7 +87,6 @@ def calc_vol_pcr(ce_vol, pe_vol): return 0.0 if ce_vol == 0 else round(pe_vol / 
 def calc_opt_pcr(ce_oi, pe_oi): return 0.0 if ce_oi == 0 else round(pe_oi / ce_oi, 2)
 def calc_vol_cpr(ce_vol, pe_vol): return 0.0 if pe_vol == 0 else round(ce_vol / pe_vol, 2)
 
-# Yahoo Finance Generic Key (Format: AAPL240119C00150000 -> Symbol_Strike+Type)
 def get_generic_key(sym):
     try:
         import re
@@ -116,7 +114,7 @@ def run_master_scan(date_str):
     client = get_gspread_client()
     if client:
         try:
-            ss = client.open("US_F&O_Data") # Sheet ka naam zaroorat anusar badal lein
+            ss = client.open("US_F&O_Data")
             ws1 = ss.get_worksheet(0) 
             ws2 = ss.worksheet("Sheet2") 
             
@@ -164,7 +162,6 @@ def run_master_scan(date_str):
     new_csv_rows = []
     live_ltp_data = {} 
 
-    # 🚀 YFINANCE FETCH LOGIC 🚀
     def fetch_yf_data(sym):
         for attempt in range(3):
             try:
@@ -181,15 +178,13 @@ def run_master_scan(date_str):
                 exps = tk.options
                 if not exps: return sym, None, None
                 
-                # Fetch closest expiry options chain
                 opt = tk.option_chain(exps[0])
-                
                 return sym, {
                     'spot_ltp': spot_ltp, 'open_p': open_p, 'float_c': float_c,
                     'ltp_ch': ltp_ch, 'chg_pct': chg_pct
                 }, opt
             except Exception:
-                time.sleep(1) # Yahoo Finance Rate Limit Prevention
+                time.sleep(1) 
         return sym, None, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -212,13 +207,11 @@ def run_master_scan(date_str):
             c_v = float(calls['volume'].sum() if 'volume' in calls else 0)
             p_v = float(puts['volume'].sum() if 'volume' in puts else 0)
             
-            # Record LTP for contracts (CE)
             for _, row in calls.iterrows():
                 sym_str = str(row.get('contractSymbol', ''))
                 lp_str = round(float(row.get('lastPrice', 0)), 2)
                 if lp_str > 0: live_ltp_data[sym_str] = lp_str
 
-            # Record LTP for contracts (PE)
             for _, row in puts.iterrows():
                 sym_str = str(row.get('contractSymbol', ''))
                 lp_str = round(float(row.get('lastPrice', 0)), 2)
@@ -228,8 +221,6 @@ def run_master_scan(date_str):
             v_cpr = calc_vol_cpr(c_v, p_v)
             v_pcr = calc_vol_pcr(c_v, p_v)
 
-            # 🚀 US MARKET TIME CHECKER (e.g., 20:00 IST / 8:00 PM) 🚀
-            # Note: 8:00 PM IST is assumed as 30 mins after US Market Open. Modify as needed.
             if scan_time_ist.time() < datetime.time(20, 0):
                 pcr_abs, vol_abs, pcr_pct, vol_pct = 0.0, 0.0, 0.0, 0.0
             else:
@@ -252,7 +243,6 @@ def run_master_scan(date_str):
                     pcr_pct = get_standard_pct(o_pcr, base_pcr_val)
                     vol_pct = get_standard_pct(v_cpr, base_vol_val)
 
-            # 🚀 GOOGLE SHEET DEPENDENT CE/PE LOGIC
             def get_conv(opt_df):
                 if opt_df.empty: return 0.0
                 tot_p, tot_m = 0, 0
@@ -284,8 +274,6 @@ def run_master_scan(date_str):
                 'CE_CON': get_conv(calls), 'PE_CON': get_conv(puts)
             })
 
-            # Record for Charts during US Market Hours (~19:00 IST to 02:30 IST)
-            # Adjusted for standard US Trading times broadly
             new_csv_rows.append({'Date': date_str, 'Symbol': s_name, 'Time': time_str, 'LTP': spot_ltp, 'VOL PCR': v_pcr, 'OPT PCR': o_pcr, 'VOL CPR': v_cpr})
 
     if snapshot_changed and client:
@@ -305,7 +293,7 @@ def run_master_scan(date_str):
     return final_list, scan_time_ist.timestamp()
 
 # ==========================================
-# 5. SIDEBAR & EOD SAVE
+# 5. SIDEBAR & EOD SAVE (WITH ERROR HANDLING)
 # ==========================================
 st.sidebar.header("📊 Yahoo Finance Status")
 st.sidebar.success("🟢 Connected to Market Data")
@@ -313,33 +301,43 @@ st.sidebar.markdown("---")
 st.sidebar.header("💾 End Of Day (EOD) Save")
 
 def save_eod_data():
-    if 'get_live_dump' in st.session_state:
-        try:
-            live_data = st.session_state.get_live_dump
-            if live_data:
-                client = get_gspread_client()
-                if not client: return False
-                
-                ss = client.open("US_F&O_Data")
-                ws2 = ss.worksheet("Sheet2")
-                
-                locked_live_data = {k: round(float(v), 2) for k, v in live_data.items()}
-                json_str = json.dumps(locked_live_data)
-                b64_str = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-                chunks = [b64_str[i:i+40000] for i in range(0, len(b64_str), 40000)]
-                
-                ws2.batch_clear(["A2:A100"])
-                clist2 = ws2.range(f'A2:A{len(chunks)+1}')
-                for i, cell in enumerate(clist2): cell.value = chunks[i]
-                
-                ws2.update_cell(1, 1, f"LAST_SAVED_DATE: {today_str}")
-                ws2.update_cells(clist2)
-                return True
-        except: pass
-    return False
+    if 'get_live_dump' not in st.session_state:
+        st.sidebar.error("⚠️ Error: Live Data अभी बना नहीं है। थोड़ा इंतज़ार करें।")
+        return False
+        
+    live_data = st.session_state.get_live_dump
+    if not live_data:
+        st.sidebar.error("⚠️ Error: डेटा खाली है! (मार्केट बंद होने या Yahoo Finance से डेटा न आने की वजह से)")
+        return False
+        
+    try:
+        client = get_gspread_client()
+        if not client: 
+            st.sidebar.error("⚠️ Error: Google Sheet कनेक्ट नहीं हो पाई। Secrets (TOML) चेक करें।")
+            return False
+            
+        ss = client.open("US_F&O_Data")
+        ws2 = ss.worksheet("Sheet2")
+        
+        locked_live_data = {k: round(float(v), 2) for k, v in live_data.items()}
+        json_str = json.dumps(locked_live_data)
+        b64_str = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+        chunks = [b64_str[i:i+40000] for i in range(0, len(b64_str), 40000)]
+        
+        ws2.batch_clear(["A2:A100"])
+        clist2 = ws2.range(f'A2:A{len(chunks)+1}')
+        for i, cell in enumerate(clist2): cell.value = chunks[i]
+        
+        ws2.update_cell(1, 1, f"LAST_SAVED_DATE: {today_str}")
+        ws2.update_cells(clist2)
+        return True
+    except Exception as e:
+        st.sidebar.error(f"⚠️ Error: {e}")
+        return False
 
 if st.sidebar.button("Manual Save Data"):
-    if save_eod_data(): st.sidebar.success("Sheet Saved Successfully!")
+    if save_eod_data(): 
+        st.sidebar.success("✅ Sheet Saved Successfully!")
 
 # ==========================================
 # 6. APP RENDERING & MAGIC VIEWER
@@ -350,7 +348,6 @@ if cached_result is not None:
     st.session_state.cached_data = cached_result
     st.session_state.last_api_call = datetime.datetime.fromtimestamp(last_scan_timestamp, IST)
     
-    # Auto-Save Check (Adjusted to trigger broadly during US pre-market)
     if datetime.time(18, 0) <= now_ist.time() < datetime.time(19, 0):
         last_save = open(AUTO_SAVE_FILE, "r").read().strip() if os.path.exists(AUTO_SAVE_FILE) else ""
         if last_save != today_str:
